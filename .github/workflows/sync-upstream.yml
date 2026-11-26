@@ -17,13 +17,42 @@ jobs:
     steps:
       - name: Checkout target repo
         uses: actions/checkout@v4
-
-      - name: Sync upstream changes
-        id: sync
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
         with:
-          upstream_sync_repo: maillab/cloud-mail
-          upstream_sync_branch: main
-          target_sync_branch: main
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-          test_mode: false
+          fetch-depth: 0
+
+      - name: Merge upstream (auto-resolve fork-owned files)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/maillab/cloud-mail.git
+          git fetch upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream."
+            exit 0
+          fi
+
+          # Merge without committing yet. Conflicts are expected on
+          # mail-worker/wrangler.toml (fork keeps its D1/KV bindings filled
+          # while upstream ships them commented out).
+          git merge --no-ff --no-commit upstream/main || true
+
+          # Fork-owned files: always keep this fork's versions in the merge
+          # result.
+          # - mail-worker/wrangler.toml holds the live D1/KV bindings.
+          # - .github/workflows/* must stay unchanged in the pushed merge,
+          #   because the default GITHUB_TOKEN is not allowed to push
+          #   workflow-file changes (that restriction is what broke the
+          #   previous sync action from 2026-11-19 on).
+          git restore --source=HEAD --staged --worktree mail-worker/wrangler.toml .github/workflows/ || true
+          git add mail-worker/wrangler.toml .github/workflows/
+
+          # Anything else still conflicted is a real conflict: stop loudly.
+          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            echo "Unresolved merge conflicts in:"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
+
+          git commit -m "Merge upstream maillab/cloud-mail main (auto-resolve: keep fork wrangler.toml bindings and workflow files)"
+          git push origin main
